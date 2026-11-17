@@ -10,8 +10,14 @@ import { MC_VERSION } from '../src/config.js'
 const mcData = mcDataLoader(MC_VERSION)
 const gather = buildGatherData(mcData)
 
-function world ({ nearby, craftingTableNearby = false } = {}) {
-  return { mcData, ...gather, nearby: nearby && new Set(nearby), craftingTableNearby }
+function world ({ nearby, mobs, craftingTableNearby = false } = {}) {
+  return {
+    mcData,
+    ...gather,
+    nearby: nearby && new Set(nearby),
+    nearbyMobs: mobs && new Set(mobs),
+    craftingTableNearby
+  }
 }
 
 function plan (w, inventory, goal, count = 1) {
@@ -129,9 +135,71 @@ test('asking for a specific log means exactly that log', () => {
 })
 
 test('explains what is missing for later stages', () => {
-  const result = plan(world({ nearby: ['oak_log', 'stone'] }), {}, 'iron_pickaxe')
+  const result = plan(world({ nearby: ['oak_log', 'stone'] }), {}, 'diamond_pickaxe')
   assert.equal(result.ok, false)
-  assert.match(result.reason, /Iron Ingot/)
+  assert.match(result.reason, /Diamond/)
+})
+
+// --- hunting and smelting -------------------------------------------------
+
+const types = (result) => result.steps.map((s) => `${s.type}:${s.item}`)
+
+test('cooked food: hunt, build a furnace, then smelt', () => {
+  const result = plan(world({ nearby: ['oak_log', 'stone'], mobs: ['cow'] }), {}, 'cooked_beef', 3)
+  assert.ok(result.ok, result.reason)
+  const steps = types(result)
+  const smelt = result.steps.find((s) => s.type === 'smelt')
+
+  assert.ok(steps.includes('hunt:beef'))
+  assert.ok(steps.indexOf('craft:furnace') < steps.indexOf('smelt:cooked_beef'))
+  assert.ok(steps.indexOf('hunt:beef') < steps.indexOf('smelt:cooked_beef'))
+  assert.equal(smelt.count, 3)
+  assert.ok(smelt.fuelCount >= 2, 'planks smelt 1.5 items each, so 3 items need 2')
+  assert.equal(result.steps.find((s) => s.type === 'collect' && s.item === 'cobblestone').count, 8)
+})
+
+test('falls back to another tool when the cheapest one is a dead end', () => {
+  // Happened live: holding 6 cobblestone (2 short of a furnace) and no pickaxe.
+  // A stone pickaxe looks cheapest for mining the rest, but the cobblestone
+  // it would use is already set aside for the furnace.
+  const result = plan(world({ nearby: ['oak_log', 'stone'], mobs: ['cow'] }), { cobblestone: 6 }, 'cooked_beef', 3)
+  assert.ok(result.ok, result.reason)
+  const steps = types(result)
+  assert.ok(steps.includes('craft:wooden_pickaxe'))
+  assert.ok(steps.indexOf('craft:wooden_pickaxe') < steps.indexOf('collect:cobblestone'))
+  assert.ok(!steps.includes('craft:stone_pickaxe'), `no detour through a stone pickaxe: ${steps}`)
+})
+
+test('smelting uses coal it already has instead of making fuel', () => {
+  const result = plan(world({ nearby: ['oak_log'], mobs: ['cow'] }), { furnace: 1, coal: 2 }, 'cooked_beef', 4)
+  assert.ok(result.ok, result.reason)
+  assert.deepEqual(types(result), ['hunt:beef', 'smelt:cooked_beef'])
+  assert.equal(result.steps[1].fuel, 'coal')
+})
+
+test('a bed: wool from sheep plus planks', () => {
+  const result = plan(world({ nearby: ['oak_log'], mobs: ['sheep'] }), {}, 'white_bed')
+  assert.ok(result.ok, result.reason)
+  const hunt = result.steps.find((s) => s.type === 'hunt')
+  assert.deepEqual(hunt.mobs, ['sheep'])
+  assert.equal(hunt.count, 3)
+  assert.ok(hunt.anyOf.includes('black_wool'), 'any sheep will do; the plan adapts to the colors we get')
+  assert.equal(result.steps.at(-1).item, 'white_bed')
+})
+
+test('iron pickaxe from nothing: stone pickaxe before mining iron', () => {
+  const result = plan(world({ nearby: ['oak_log', 'stone', 'iron_ore', 'coal_ore'] }), {}, 'iron_pickaxe')
+  assert.ok(result.ok, result.reason)
+  const steps = types(result)
+  assert.ok(steps.indexOf('craft:stone_pickaxe') < steps.indexOf('collect:raw_iron'),
+    'iron ore needs at least a stone pickaxe')
+  assert.ok(steps.indexOf('smelt:iron_ingot') < steps.indexOf('craft:iron_pickaxe'))
+})
+
+test('still plans a hunt when no animals are in sight (the bot will explore)', () => {
+  const result = plan(world({ nearby: ['oak_log'], mobs: [] }), { furnace: 1, coal: 1 }, 'cooked_beef')
+  assert.ok(result.ok, result.reason)
+  assert.deepEqual(types(result), ['hunt:beef', 'smelt:cooked_beef'])
 })
 
 test('rejects names that are not items', () => {

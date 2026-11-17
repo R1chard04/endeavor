@@ -3,37 +3,63 @@
 import { collect } from './skills/collect.js'
 import { obtain, planFor } from './skills/obtain.js'
 import { comeTo, giveTo } from './skills/players.js'
-import { inventorySummary } from './skills/inventory.js'
+import { countItem, inventorySummary } from './skills/inventory.js'
+import { eat } from './skills/eat.js'
+import { hasBed, sleepInBed, shelter } from './skills/night.js'
 import { describeStep } from './planner/planner.js'
 
 const PREFIX = '!'
 
 const HELP = [
+  '!auto [off] - play on my own (or stop)',
+  '!status - what I am up to, my health and food',
   '!wood [n] - chop n logs of any kind (default 16)',
-  '!get <item> [n] - get an item, crafting whatever it needs. e.g. !get stone pickaxe',
+  '!get <item> [n] - get an item: mine, hunt, craft or smelt. e.g. !get cooked beef 4',
   '!plan <item> [n] - show the steps without doing them',
   '!come - walk to you',
   '!give [item|logs] - bring you everything, or just one kind of item',
+  '!eat - eat something now',
+  '!sleep - sleep in my bed, or dig in for the night',
   '!inv - list what I am carrying',
-  '!stop - stop what I am doing'
+  '!stop - stop what I am doing (including !auto)'
 ]
 
-export function createCommandHandler (bot, { gather, tasks, config, log, say }) {
+/**
+ * @param ctx.setAuto - turn autonomous play on or off
+ * @param ctx.afterJob - called when a chat job finishes (to resume autonomous play)
+ */
+export function createCommandHandler (bot, { gather, tasks, brain, config, log, say, setAuto, afterJob = () => {} }) {
   const opts = (signal) => ({ signal, log, say })
+  // Run a job from chat. Jobs may be interrupted by reflexes and restarted,
+  // so each one works out what's left to do when it (re)starts.
+  const job = (name, fn) => tasks.run(name, fn).then(afterJob)
 
   const commands = {
     help () {
       for (const line of HELP) say(line)
     },
 
+    auto (args) {
+      const on = args[0]?.toLowerCase() !== 'off'
+      setAuto(on)
+      say(on ? "I'll play on my own. Type !auto off to stop." : 'OK, waiting for commands.')
+    },
+
+    status () {
+      const { x, y, z } = bot.entity.position.floored()
+      say(`${brain.status()} Health ${Math.round(bot.health)}/20, food ${bot.food}/20, at ${x} ${y} ${z}.`)
+    },
+
     wood (args) {
       const count = parseCount(args[0], 16)
-      tasks.run(`chop ${count} logs`, (signal) => collect(bot, gather, gather.logs, count, opts(signal)))
+      const target = countItem(bot, gather.logs) + count
+      job(`chop ${count} logs`, (signal) =>
+        collect(bot, gather, gather.logs, Math.max(0, target - countItem(bot, gather.logs)), opts(signal)))
     },
 
     get (args) {
       const { item, count } = parseItem(bot, args)
-      tasks.run(`get ${count} ${item}`, (signal) => obtain(bot, gather, item, count, opts(signal)))
+      job(`get ${count} ${item}`, (signal) => obtain(bot, gather, item, count, opts(signal)))
     },
 
     plan (args) {
@@ -45,7 +71,7 @@ export function createCommandHandler (bot, { gather, tasks, config, log, say }) 
     },
 
     come (args, username) {
-      tasks.run(`come to ${username}`, () => comeTo(bot, username))
+      job(`come to ${username}`, () => comeTo(bot, username))
     },
 
     give (args, username) {
@@ -55,10 +81,20 @@ export function createCommandHandler (bot, { gather, tasks, config, log, say }) 
         : what === 'logs' || what === 'wood'
           ? (name) => gather.logs.includes(name)
           : (name) => name === what
-      tasks.run(`give ${what || 'everything'} to ${username}`, async () => {
+      job(`give ${what || 'everything'} to ${username}`, async () => {
         const given = await giveTo(bot, username, which)
         if (given === 0) say(`I don't have any ${what || 'items'}`)
       })
+    },
+
+    eat () {
+      job('eat', async () => {
+        if (!(await eat(bot))) say(bot.food >= 20 ? "I'm not hungry" : 'I have nothing good to eat')
+      })
+    },
+
+    sleep () {
+      job('sleep', (signal) => hasBed(bot) ? sleepInBed(bot, opts(signal)) : shelter(bot, opts(signal)))
     },
 
     inv () {
@@ -66,6 +102,7 @@ export function createCommandHandler (bot, { gather, tasks, config, log, say }) 
     },
 
     async stop () {
+      setAuto(false)
       if (!tasks.busy) return say("I'm not doing anything")
       await tasks.stop()
       say('Stopped')

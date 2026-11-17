@@ -7,12 +7,19 @@ import { makePlan, describeStep } from '../planner/planner.js'
 import { countItem, inventoryMap, inventorySummary } from './inventory.js'
 import { collect } from './collect.js'
 import { craft, findCraftingTable } from './craft.js'
+import { hunt } from './hunt.js'
+import { smelt, findFurnace } from './smelt.js'
 
 const NEARBY_RADIUS = 32
+const MOB_RADIUS = 48
 const MAX_STEPS = 40
 
-export async function obtain (bot, gather, goal, count, { signal, log = () => {}, say = log } = {}) {
-  for (let i = 0; i < MAX_STEPS; i++) {
+/**
+ * @param opts.steps - do at most this many steps, then return (so the caller
+ *   can rethink the goal, e.g. which bed color to make). Default: keep going.
+ */
+export async function obtain (bot, gather, goal, count, { signal, log = () => {}, say = log, steps } = {}) {
+  for (let i = 0; i < (steps ?? MAX_STEPS); i++) {
     signal?.throwIfAborted()
     if (countItem(bot, goal) >= count) return
 
@@ -23,18 +30,27 @@ export async function obtain (bot, gather, goal, count, { signal, log = () => {}
     if (!step) return
 
     say(`${describeStep(step, bot.registry)} (${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'} left)`)
-    if (step.type === 'collect') {
-      // Chop the wood the plan picked if it's in sight; any other wood is the fallback.
-      // (Always taking the closest tree can loop: the plan wants dark oak, we keep getting oak.)
-      const exactIsNearby = gather.sources.get(step.item).some((b) => world.nearby.has(b))
-      const items = exactIsNearby ? [step.item] : step.anyOf
-      await collect(bot, gather, items, step.count, { signal, log })
-    } else {
-      await craft(bot, step.item, step.times, { signal, log })
+    const opts = { signal, log }
+    switch (step.type) {
+      case 'collect': {
+        // Chop the wood the plan picked if it's in sight; any other wood is the fallback.
+        // (Always taking the closest tree can loop: the plan wants dark oak, we keep getting oak.)
+        const exactIsNearby = gather.sources.get(step.item).some((b) => world.nearby.has(b))
+        await collect(bot, gather, exactIsNearby ? [step.item] : step.anyOf, step.count, opts)
+        break
+      }
+      case 'hunt':
+        await hunt(bot, step.mobs, step.anyOf, step.count, opts)
+        break
+      case 'smelt':
+        await smelt(bot, step, opts)
+        break
+      default:
+        await craft(bot, step.item, step.times, opts)
     }
     log(`  now holding: ${inventorySummary(bot)}`)
   }
-  throw new Error(`I gave up on ${goal} after ${MAX_STEPS} steps`)
+  if (steps === undefined) throw new Error(`I gave up on ${goal} after ${MAX_STEPS} steps`)
 }
 
 /** The planner's current plan, from what the bot holds and can see right now. */
@@ -48,8 +64,18 @@ function snapshot (bot, gather) {
     mcData: bot.registry,
     ...gather,
     nearby: nearbyBlocks(bot, gather),
-    craftingTableNearby: Boolean(findCraftingTable(bot))
+    nearbyMobs: nearbyMobs(bot),
+    craftingTableNearby: Boolean(findCraftingTable(bot)),
+    furnaceNearby: Boolean(findFurnace(bot))
   }
+}
+
+function nearbyMobs (bot) {
+  const names = new Set()
+  for (const e of Object.values(bot.entities)) {
+    if (e !== bot.entity && e.name && e.position.distanceTo(bot.entity.position) <= MOB_RADIUS) names.add(e.name)
+  }
+  return names
 }
 
 // Which of the gatherable blocks are near the bot. Scanning is slow-ish, and
