@@ -3,9 +3,11 @@
 
 import { countItem } from './inventory.js'
 import { explore } from './explore.js'
+import { lightUpIfDark } from './light.js'
 
 const SEARCH_RADIUS = 64
 const MAX_EXPLORES = 6
+const TARGET_TIME_LIMIT_MS = 90_000 // digging down to deep ore can legitimately take a while
 
 /**
  * Collect `count` more of any of `items`.
@@ -40,18 +42,19 @@ export async function collect (bot, gather, items, count, { signal, log = () => 
     }
 
     const before = countItem(bot, items)
-    // For a tree, grab the whole trunk at once: the "vein" is every touching log of the same kind.
-    const targets = gather.logs.includes(block.name)
+    // For a tree or an ore vein, take every touching block of the same kind in one go.
+    const targets = gather.logs.includes(block.name) || block.name.endsWith('_ore')
       ? bot.collectBlock.findFromVein(block, target - before, 12)
       : [block]
     log(`Going for ${targets.length} ${block.name} at ${block.position}`)
 
     try {
-      await bot.collectBlock.collect(targets, { ignoreNoPath: true })
+      await collectWithTimeout(bot, targets, signal)
     } catch (err) {
       signal?.throwIfAborted()
       log(`Couldn't reach the ${block.name} at ${block.position}: ${err.message}`)
     }
+    await lightUpIfDark(bot, { log }) // underground: keep monsters from spawning around us
 
     if (countItem(bot, items) > before) {
       explores = 0
@@ -61,8 +64,51 @@ export async function collect (bot, gather, items, count, { signal, log = () => 
   }
 }
 
+// The collectblock plugin can occasionally hang (seen live: no error, no
+// movement, for minutes). Give each attempt a time limit, and stop waiting
+// right away if our task is cancelled.
+async function collectWithTimeout (bot, targets, signal) {
+  let timer
+  let onAbort
+  const giveUp = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('it was taking too long')), TARGET_TIME_LIMIT_MS)
+    onAbort = () => reject(signal.reason ?? new Error('stopped'))
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    await Promise.race([bot.collectBlock.collect(targets, { ignoreNoPath: true }), giveUp])
+  } catch (err) {
+    abandonCollect(bot)
+    throw err
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+/** Unstick the collectblock plugin: stop moving and digging, and forget its targets. */
+export function abandonCollect (bot) {
+  bot.pathfinder.stop()
+  try { bot.stopDigging() } catch {}
+  bot.collectBlock.targets.clear()
+  bot.emit('collectBlock_finished') // release anyone waiting on the stuck collect
+}
+
 function findNearest (bot, blockIds, skipped) {
   const positions = bot.findBlocks({ matching: blockIds, maxDistance: SEARCH_RADIUS, count: 64 })
-  const pos = positions.find((p) => !skipped.has(p.toString()))
-  return pos ? bot.blockAt(pos) : null
+  for (const pos of positions) {
+    if (skipped.has(pos.toString())) continue
+    const block = bot.blockAt(pos)
+    // Ore in a flooded cave means fighting underwater and running out of air
+    // (it killed the bot in testing). There's plenty of dry ore; skip it.
+    if (block.name.endsWith('_ore') && touchesWater(bot, pos)) continue
+    return block
+  }
+  return null
+}
+
+function touchesWater (bot, pos) {
+  const water = bot.registry.blocksByName.water.id
+  return [[0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 2, 0]]
+    .some(([dx, dy, dz]) => bot.blockAt(pos.offset(dx, dy, dz))?.type === water)
 }

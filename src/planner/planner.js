@@ -28,6 +28,7 @@ const MAX_OPTIONS_TRIED = 4 // per item, when the cheapest way turns out to be a
  * @property {Map<string, string[]>} sources - item -> blocks that drop it
  * @property {Map<string, {mobs: string[], perKill: number}>} [hunts] - item -> animals that drop it
  * @property {Map<string, string[]>} [smelts] - item -> furnace inputs that make it
+ * @property {Map<string, {container: string, block: string}>} [fills] - e.g. water_bucket -> bucket + water
  * @property {{item: string, smelts: number}[]} [fuels] - what can burn, and how much each smelts
  * @property {Map<string, number>} [rarity] - item -> how much harder than usual it is to find
  * @property {Map<string, {label: string, members: string[]}>} groups - interchangeable items
@@ -41,7 +42,8 @@ const MAX_OPTIONS_TRIED = 4 // per item, when the cheapest way turns out to be a
  * @typedef {{ type: 'collect', item: string, count: number, anyOf: string[], label: string }
  *         | { type: 'hunt', item: string, count: number, mobs: string[], anyOf: string[], label: string }
  *         | { type: 'craft', item: string, times: number, count: number, table: boolean }
- *         | { type: 'smelt', item: string, input: string, count: number, fuel: string, fuelCount: number }} Step
+ *         | { type: 'smelt', item: string, input: string, count: number, fuel: string, fuelCount: number }
+ *         | { type: 'fill', item: string, container: string, block: string, count: number }} Step
  */
 
 class PlanError extends Error {}
@@ -124,6 +126,12 @@ export function makePlan (world, inventory, goal, count = 1) {
         })
         return
       }
+      case 'fill': {
+        const { container, block } = world.fills.get(item)
+        acquire(container, missing, here) // the empty bucket becomes the full one
+        steps.push({ type: 'fill', item, container, block, count: missing })
+        return
+      }
       case 'craft': {
         const { recipe } = option
         const times = Math.ceil(missing / recipe.out)
@@ -196,6 +204,8 @@ export function describeStep (step, mcData) {
       return `Hunt ${step.mobs.join('/')} for ${step.count} ${what}`
     case 'smelt':
       return `Smelt ${step.count} × ${name(step.input)} into ${name(step.item)} (fuel: ${step.fuelCount} ${name(step.fuel)})`
+    case 'fill':
+      return `Fill ${step.count} × ${name(step.container)} with ${step.block}`
     default:
       return `Craft ${step.count} × ${name(step.item)}`
   }
@@ -209,7 +219,8 @@ function explainMissing (world, coster, goal) {
   while (!seen.has(item)) {
     seen.add(item)
     if (world.sources.has(item) || world.hunts?.has(item)) break // gatherable, but its tool isn't
-    const inputs = world.smelts?.get(item) ?? []
+    const fill = world.fills?.get(item)
+    const inputs = [...(world.smelts?.get(item) ?? []), ...(fill ? [fill.container] : [])]
     const ingredients = [
       ...getRecipes(world.mcData, item).flatMap((r) => r.ingredients),
       ...inputs.map((name) => ({ name, count: 1 }))
@@ -331,6 +342,15 @@ function createCoster (world, inventory) {
       const c = SMELT_COST * missing + inputCost + fuel.cost +
         stationCost('furnace', world.furnaceNearby)
       consider({ kind: 'smelt', input, fuel, cost: c })
+    }
+
+    const fill = world.fills?.get(item)
+    if (fill) {
+      const seen = !world.nearby || world.nearby.has(fill.block)
+      const containerCost = cost(fill.container, missing)
+      if (containerCost < Infinity) {
+        consider({ kind: 'fill', cost: containerCost + missing * (seen ? NEARBY_COST * 2 : FAR_COST) })
+      }
     }
 
     visiting.delete(item)

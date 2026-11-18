@@ -72,6 +72,11 @@ export async function placeNearby (bot, itemName, { twoLong = false, log = () =>
   try {
     return await placeHere(bot, itemName, twoLong)
   } catch (err) {
+    // In a tunnel or a shaft there's no open floor: dig a niche into the wall.
+    if (!twoLong && await carveNiche(bot)) {
+      log(`${err.message}; carved out a spot`)
+      return await placeHere(bot, itemName, twoLong)
+    }
     // Standing in water or a hole leaves nowhere to put things: find open ground and retry.
     log(`${err.message}; moving to open ground`)
     if (!(await moveToOpenGround(bot))) throw err
@@ -79,7 +84,25 @@ export async function placeNearby (bot, itemName, { twoLong = false, log = () =>
   }
 }
 
-async function placeHere (bot, itemName, twoLong) {
+// Dig out one wall block beside our feet, so there's a free spot with solid
+// floor under it. Never a block next to lava.
+async function carveNiche (bot) {
+  const feet = bot.entity.position.floored()
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const pos = feet.offset(dx, 0, dz)
+    const wall = bot.blockAt(pos)
+    const floor = bot.blockAt(pos.offset(0, -1, 0))
+    if (wall?.boundingBox !== 'block' || floor?.boundingBox !== 'block') continue
+    if (!wall.diggable || wall.hardness === null || wall.hardness > 5) continue
+    if (!bot.pathfinder.movements.safeToBreak(wall)) continue
+    await bot.tool.equipForBlock(wall)
+    await bot.dig(wall)
+    return true
+  }
+  return false
+}
+
+export async function placeHere (bot, itemName, twoLong = false) {
   const item = bot.inventory.items().find((i) => i.name === itemName)
   if (!item) throw new Error(`I don't have a ${itemName}`)
   const feet = bot.entity.position.floored()

@@ -3,23 +3,33 @@
 // and the task carries on afterwards.
 //
 //   priority  reflex
-//   100       get out of lava
+//   100       get out of lava (pour a water bucket if we have one)
 //    95       swim up before drowning
 //    90       run away (badly hurt, or a creeper and no weapon)
+//    85       get away from something hurting us that we can't reach
 //    80       fight back
 //    50       eat
+//    20       throw away junk when the inventory is nearly full
 
 import pathfinderPkg from 'mineflayer-pathfinder'
-import { attack, runFrom, nearestHostile, equipWeapon } from '../skills/combat.js'
+import { attack, runFrom, nearestHostile, isHostile, equipWeapon, ARCHERS, REACH } from '../skills/combat.js'
+import { keepAfloat, isSubmerged } from '../skills/swimming.js'
 import { eat, bestFood } from '../skills/eat.js'
+import { douse, hasWaterBucket } from '../skills/buckets.js'
+import { wearBestGear } from '../skills/equipment.js'
+import { needsTidying, tossJunk } from '../skills/inventory.js'
 import { sleep } from '../util.js'
 
 const { goals } = pathfinderPkg
 const CHECK_EVERY_MS = 500
+const HOUSEKEEPING_MS = 3000
+const TIDY_EVERY_MS = 60_000
+const IGNORE_UNREACHABLE_MS = 30_000 // leave a mob we couldn't reach alone this long
 const FIGHT_RANGE = 8 // attack hostile mobs this close
 const ALERT_RANGE = 16 // ...or this close if one just hurt us (skeletons shoot from range)
 const LOW_HEALTH = 6 // 3 hearts
 const LOW_HEALTH_VS_ARCHERS = 10 // 5 hearts
+const LOW_AIR = 10 // of 20: surface with plenty of margin (fights underwater ate the rest)
 const HUNGRY = 14 // eat below this...
 const TOPPED_UP = 18 // ...or below this while hurt, since health only regenerates at 18+
 
@@ -29,19 +39,36 @@ export class Reflexes {
     this.tasks = tasks
     this.log = log
     this.lastHurtAt = 0
+    this.lastAttacker = null
+    this.unreachable = new Map() // mob id -> ignore it until this time
     this.inFlight = null // { priority }
+    this.lastTidyAt = 0
   }
 
   start () {
     const bot = this.bot
-    bot.on('entityHurt', (entity) => {
-      if (entity === bot.entity) this.lastHurtAt = Date.now()
+    keepAfloat(bot)
+    bot.on('entityHurt', (entity, source) => {
+      if (entity !== bot.entity) return
+      this.lastHurtAt = Date.now()
+      if (source) this.lastAttacker = source
     })
     // Right after (re)spawning, state like "in lava" can still be stale for a moment.
     this.spawnedAt = Date.now()
     bot.on('spawn', () => { this.spawnedAt = Date.now() })
     const timer = setInterval(() => this.check(), CHECK_EVERY_MS)
-    bot.once('end', () => clearInterval(timer))
+    // Put on any better armor or a shield as soon as we have them. Equipping
+    // armor doesn't touch the item in hand, so this needn't interrupt anything.
+    const housekeeping = setInterval(() => {
+      // Not while a crafting table or furnace is open: moving items then confuses both.
+      if (this.inFlight || !bot.entity || bot.health <= 0 || this.dressing || bot.currentWindow) return
+      this.dressing = true
+      wearBestGear(bot).catch(() => {}).finally(() => { this.dressing = false })
+    }, HOUSEKEEPING_MS)
+    bot.once('end', () => {
+      clearInterval(timer)
+      clearInterval(housekeeping)
+    })
     // Lava does 4 damage every half second: don't wait for the next check.
     bot.on('physicsTick', () => { if (bot.entity && inLava(bot)) this.check() })
   }
@@ -65,12 +92,12 @@ export class Reflexes {
   mostUrgent () {
     const bot = this.bot
     if (inLava(bot)) return { name: 'escape lava', priority: 100, run: (s) => this.escapeLava(s) }
-    if (bot.entity.isInWater && bot.oxygenLevel <= 6) {
+    if (bot.entity.isInWater && bot.oxygenLevel <= LOW_AIR) {
       return { name: 'swim up for air', priority: 95, run: (s) => this.swimUp(s) }
     }
 
     const recentlyHurt = Date.now() - this.lastHurtAt < 3000
-    const threat = nearestHostile(bot, recentlyHurt ? ALERT_RANGE : FIGHT_RANGE)
+    const threat = nearestHostile(bot, recentlyHurt ? ALERT_RANGE : FIGHT_RANGE, (e) => this.outOfReach(e))
     if (threat) {
       const unarmed = !hasWeapon(bot)
       if (bot.health <= retreatAt(threat) || (threat.name === 'creeper' && unarmed)) {
@@ -78,22 +105,73 @@ export class Reflexes {
       }
       return { name: `fight ${threat.name}`, priority: 80, run: (s) => this.fight(s) }
     }
+    // Being hurt by something we can't get at (a drowned throwing tridents
+    // from the deep, a skeleton across a river): don't stand there, leave.
+    const attacker = this.lastAttacker
+    if (recentlyHurt && attacker?.isValid && isHostile(attacker) && this.outOfReach(attacker)) {
+      return { name: `get away from ${attacker.name}`, priority: 85, run: (s) => this.flee(attacker, s) }
+    }
 
     const hungry = bot.food <= HUNGRY || (bot.food < TOPPED_UP && bot.health < 20)
     if (hungry && bestFood(bot)) return { name: 'eat', priority: 50, run: () => eat(bot) }
+
+    // At most once a minute: if the junk lands within reach and we pick it
+    // back up, this would otherwise loop.
+    if (needsTidying(bot) && Date.now() - this.lastTidyAt > TIDY_EVERY_MS && !bot.currentWindow) {
+      return { name: 'throw away junk', priority: 20, run: (s) => this.tidy(s) }
+    }
     return null
   }
 
-  // Keep fighting until nothing hostile is close.
+  async tidy (signal) {
+    const bot = this.bot
+    this.lastTidyAt = Date.now()
+    const spot = bot.entity.position.clone()
+    const tossed = await tossJunk(bot)
+    this.log(`Inventory nearly full: threw away ${tossed} junk blocks`)
+    // Dropped items can't be picked up for 2 seconds. Get clear of them by
+    // then, or (in a tunnel especially) we'd walk straight back over them.
+    const timer = setTimeout(() => bot.pathfinder.stop(), 4000)
+    try {
+      await bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalNear(spot.x, spot.y, spot.z, 5)))
+    } catch {
+      signal?.throwIfAborted()
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  // Keep fighting until nothing hostile (that we can reach) is close.
   async fight (signal) {
     const bot = this.bot
     await equipWeapon(bot)
     let mob
-    while ((mob = nearestHostile(bot, ALERT_RANGE)) && bot.entity.position.distanceTo(mob.position) <= ALERT_RANGE) {
+    while ((mob = nearestHostile(bot, ALERT_RANGE, (e) => this.outOfReach(e)))) {
       signal.throwIfAborted()
       if (bot.health <= retreatAt(mob)) return // the flee reflex takes over
-      await attack(bot, mob, { signal, giveUpAfterMs: 20_000 })
+      if (bot.entity.isInWater && bot.oxygenLevel <= LOW_AIR) return // breathe first
+      const gone = await attack(bot, mob, { signal, giveUpAfterMs: 20_000 })
+      if (!gone && mob.isValid) {
+        // Can't get at it (deep under water, across a gap). Chasing it again
+        // half a second later would loop forever, so leave it be for a while.
+        this.unreachable.set(mob.id, Date.now() + IGNORE_UNREACHABLE_MS)
+        this.log(`Can't reach the ${mob.name}; leaving it alone for now`)
+      }
     }
+  }
+
+  // A mob we recently failed to reach, unless it has come close enough to hit.
+  outOfReach (mob) {
+    const until = this.unreachable.get(mob.id)
+    if (!until) return false
+    if (until < Date.now()) {
+      this.unreachable.delete(mob.id)
+      return false
+    }
+    // Only take it on again once it's close *and* up out of the water: a mob
+    // bobbing at the edge of reach would otherwise flip us back and forth.
+    const close = mob.position.distanceTo(this.bot.entity.position) <= REACH + 1
+    return !(close && !isSubmerged(this.bot, mob))
   }
 
   async flee (mob, signal) {
@@ -106,6 +184,12 @@ export class Reflexes {
   // steer straight at the nearest safe spot and sprint-jump until we're out.
   async escapeLava (signal) {
     const bot = this.bot
+    // With a water bucket, pour it at our feet: the lava turns to stone and the fire goes out.
+    if (hasWaterBucket(bot)) {
+      this.log(`In lava with ${Math.round(bot.health)} health: pouring water`)
+      await douse(bot, { signal })
+      if (!inLava(bot)) return
+    }
     const safe = findSafeSpot(bot, 6)
     if (!safe) {
       bot.setControlState('jump', true) // nowhere obvious to go: at least try to get up and out
@@ -134,6 +218,11 @@ export class Reflexes {
 
   async putOutFire (signal) {
     const bot = this.bot
+    if (hasWaterBucket(bot)) {
+      this.log('On fire: pouring water')
+      await douse(bot, { signal })
+      return
+    }
     const water = bot.findBlock({ matching: bot.registry.blocksByName.water.id, maxDistance: 16 })
     if (!water) return
     this.log(`On fire: running for the water at ${water.position}`)
@@ -151,8 +240,9 @@ export class Reflexes {
     const bot = this.bot
     bot.setControlState('jump', true)
     try {
-      const until = Date.now() + 6000
-      while (bot.oxygenLevel < 15 && Date.now() < until) await sleep(250, signal)
+      // Stay up until fully recovered, so we don't dive straight back in short of air.
+      const until = Date.now() + 10_000
+      while ((bot.oxygenLevel < 19 || bot.entity.isInWater) && Date.now() < until) await sleep(250, signal)
     } finally {
       bot.setControlState('jump', false)
     }
@@ -160,7 +250,6 @@ export class Reflexes {
 }
 
 // Archers keep shooting while you chase them, so back off from them sooner.
-const ARCHERS = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager', 'piglin', 'witch', 'blaze'])
 function retreatAt (mob) {
   return ARCHERS.has(mob.name) ? LOW_HEALTH_VS_ARCHERS : LOW_HEALTH
 }

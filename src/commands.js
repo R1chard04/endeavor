@@ -6,6 +6,7 @@ import { comeTo, giveTo } from './skills/players.js'
 import { countItem, inventorySummary } from './skills/inventory.js'
 import { eat } from './skills/eat.js'
 import { hasBed, sleepInBed, shelter } from './skills/night.js'
+import { gearSummary } from './skills/equipment.js'
 import { describeStep } from './planner/planner.js'
 
 const PREFIX = '!'
@@ -47,7 +48,8 @@ export function createCommandHandler (bot, { gather, tasks, brain, config, log, 
 
     status () {
       const { x, y, z } = bot.entity.position.floored()
-      say(`${brain.status()} Health ${Math.round(bot.health)}/20, food ${bot.food}/20, at ${x} ${y} ${z}.`)
+      const air = bot.oxygenLevel < 20 ? `, air ${bot.oxygenLevel}/20` : ''
+      say(`${brain.status()} Health ${Math.round(bot.health)}/20, food ${bot.food}/20${air}, at ${x} ${y} ${z}.`)
     },
 
     wood (args) {
@@ -98,7 +100,7 @@ export function createCommandHandler (bot, { gather, tasks, brain, config, log, 
     },
 
     inv () {
-      say(`I have: ${inventorySummary(bot)}`)
+      say(`I have: ${inventorySummary(bot)}. Wearing: ${gearSummary(bot)}.`)
     },
 
     async stop () {

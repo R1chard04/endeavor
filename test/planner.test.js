@@ -202,6 +202,38 @@ test('still plans a hunt when no animals are in sight (the bot will explore)', (
   assert.deepEqual(types(result), ['hunt:beef', 'smelt:cooked_beef'])
 })
 
+// --- stage 4: iron, buckets, torches -----------------------------------------
+
+test('a water bucket: mine and smelt iron, craft a bucket, fill it', () => {
+  const result = plan(world({ nearby: ['oak_log', 'stone', 'iron_ore', 'coal_ore', 'water'] }),
+    { stone_pickaxe: 1, crafting_table: 1 }, 'water_bucket')
+  assert.ok(result.ok, result.reason)
+  const steps = types(result)
+  assert.deepEqual(steps.slice(-2), ['craft:bucket', 'fill:water_bucket'])
+  assert.ok(steps.indexOf('smelt:iron_ingot') < steps.indexOf('craft:bucket'))
+  assert.equal(result.steps.find((s) => s.type === 'collect' && s.item === 'raw_iron').count, 3)
+})
+
+test('torches from coal when there is coal around', () => {
+  const result = plan(world({ nearby: ['oak_log', 'stone', 'coal_ore'] }), { wooden_pickaxe: 1, stick: 2 }, 'torch', 8)
+  assert.ok(result.ok, result.reason)
+  assert.deepEqual(types(result), ['collect:coal', 'craft:torch'])
+})
+
+test('torches from charcoal when there is no coal', () => {
+  const result = plan(world({ nearby: ['oak_log', 'stone'] }), { wooden_pickaxe: 1, crafting_table: 1 }, 'torch', 4)
+  assert.ok(result.ok, result.reason)
+  assert.ok(types(result).includes('smelt:charcoal'))
+})
+
+test('iron armor: enough raw iron for the piece, smelted with fuel it has', () => {
+  const result = plan(world({ nearby: ['stone', 'iron_ore'] }),
+    { stone_pickaxe: 1, crafting_table: 1, furnace: 1, coal: 2 }, 'iron_chestplate')
+  assert.ok(result.ok, result.reason)
+  assert.deepEqual(types(result), ['collect:raw_iron', 'smelt:iron_ingot', 'craft:iron_chestplate'])
+  assert.equal(result.steps[0].count, 8)
+})
+
 test('rejects names that are not items', () => {
   const result = plan(world(), {}, 'woodn_pickaxe')
   assert.equal(result.ok, false)

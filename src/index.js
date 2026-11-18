@@ -11,6 +11,7 @@ import mineflayer from 'mineflayer'
 import pathfinderPkg from 'mineflayer-pathfinder'
 import collectBlockPkg from 'mineflayer-collectblock'
 import { config } from './config.js'
+import { createMovements } from './movement.js'
 import { buildGatherData } from './planner/sources.js'
 import { TaskRunner } from './tasks.js'
 import { Reflexes } from './survival/reflexes.js'
@@ -20,7 +21,7 @@ import { collect } from './skills/collect.js'
 import { obtain } from './skills/obtain.js'
 import { countItem, inventorySummary } from './skills/inventory.js'
 
-const { pathfinder, Movements } = pathfinderPkg
+const { pathfinder } = pathfinderPkg
 
 const { values: cli } = parseArgs({
   options: {
@@ -63,12 +64,11 @@ function connect () {
     // The world arrives in chunks after spawning; look around only once it's here.
     await bot.waitForChunksToLoad()
 
-    const movements = new Movements(bot)
-    movements.allowParkour = false // fewer falls into ravines
-    movements.dontCreateFlow = true // never break a block that would let water or lava flow in
-    bot.pathfinder.setMovements(movements)
-    // collectBlock brings its own movement settings, and they turn
-    // dontCreateFlow off. Without them it uses ours.
+    bot.pathfinder.setMovements(createMovements(bot))
+    // Ore is often 30+ blocks down; give the pathfinder longer to plan a dig route.
+    bot.pathfinder.thinkTimeout = 10_000
+    // collectBlock brings its own movement settings, which allow breaking
+    // blocks next to lava. Without them it uses ours.
     bot.collectBlock.movements = null
 
     const gather = buildGatherData(bot.registry)

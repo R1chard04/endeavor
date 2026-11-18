@@ -36,12 +36,18 @@ const SMELTS = {
   stone: 'cobblestone'
 }
 
+// item -> an empty container you fill from a block in the world
+const FILLS = {
+  water_bucket: { container: 'bucket', block: 'water' }
+}
+
 /**
  * @param {object} mcData - a minecraft-data instance (bot.registry)
  * @returns {{
  *   sources: Map<string, string[]>,
  *   hunts: Map<string, { mobs: string[], perKill: number }>,
  *   smelts: Map<string, string[]>,
+ *   fills: Map<string, { container: string, block: string }>,
  *   fuels: { item: string, smelts: number }[],
  *   rarity: Map<string, number>,
  *   groups: Map<string, { label: string, members: string[] }>,
@@ -51,6 +57,7 @@ const SMELTS = {
  *   sources: item name -> block names that drop it
  *   hunts:   item name -> animals that drop it
  *   smelts:  item name -> what can go in the furnace to get it
+ *   fills:   item name -> container + block to fill it from (bucket + water)
  *   fuels:   what can burn, and how many items each one smelts
  *   rarity:  item name -> how much harder than usual it is to find (1 = common)
  *   groups:  item name -> every item that can stand in for it when gathering
@@ -101,6 +108,10 @@ export function buildGatherData (mcData) {
   }
   smelts.set('charcoal', logs) // any log burns down to charcoal
 
+  const fills = new Map(
+    Object.entries(FILLS).filter(([item, f]) => mcData.itemsByName[item] && mcData.blocksByName[f.block])
+  )
+
   // How many items one piece of fuel smelts.
   const fuels = [
     { item: 'coal', smelts: 8 },
@@ -118,5 +129,5 @@ export function buildGatherData (mcData) {
   const woolGroup = { label: 'wool (any color)', members: wools }
   for (const wool of wools) groups.set(wool, woolGroup)
 
-  return { sources, hunts, smelts, fuels, rarity, groups, logs, planks }
+  return { sources, hunts, smelts, fills, fuels, rarity, groups, logs, planks }
 }

@@ -54,6 +54,12 @@ export class Brain {
     const goalSignal = AbortSignal.any([signal, switchTo.signal, AbortSignal.timeout(GOAL_TIME_LIMIT_MS)])
     const rank = this.goals.indexOf(goal)
     const watcher = setInterval(() => {
+      // Done some other way (picked one up, someone gave it to us)? Move on.
+      if (goal.isDone()) {
+        clearInterval(watcher)
+        switchTo.abort()
+        return
+      }
       const next = this.next()
       if (next && this.goals.indexOf(next) < rank) {
         clearInterval(watcher)
@@ -89,7 +95,7 @@ export class Brain {
 
   /** A one-line status for chat. */
   status () {
-    const done = this.goals.filter((g) => g.isDone() && g.name.startsWith('make')).map((g) => g.name.replace('make ', ''))
+    const done = this.goals.filter((g) => g.milestone && g.isDone()).map((g) => g.label)
     const next = this.next()
     return `Working on: ${next?.name ?? 'nothing'}. Done: ${done.join(', ') || 'nothing yet'}.`
   }

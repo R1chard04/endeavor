@@ -10,8 +10,8 @@ It uses [Mineflayer](https://github.com/PrismarineJS/mineflayer), so the bot joi
 |---|---|---|
 | 1. Wood | Find trees, chop the whole trunk, pick up the logs | ✅ |
 | 2. Tools | Craft planks, sticks and a crafting table, then wooden and stone pickaxes | ✅ |
-| 3. Survive | Fight or run from mobs, eat, hunt and cook food, sleep in a bed or dig in for the night, get out of lava and water | ✅ |
-| 4. Iron | Mine, smelt, make iron tools, armor and a bucket | Started: the planner can plan an iron pickaxe; not tested live |
+| 3. Survive | Fight or run from mobs, eat, hunt and cook food, sleep in a bed or dig in for the night, swim (float at the surface), get out of lava and water | ✅ |
+| 4. Iron | Mine iron (lighting tunnels with torches), smelt, make an iron pickaxe, sword, shield, armor and a water bucket; wear armor, block arrows with the shield, pour water on lava, throw away junk when its inventory fills up | ✅ On its own, from stone tools to an iron pickaxe, shield, sword, water bucket and chestplate in about 10 minutes, at full health. The last three armor pieces use the same steps |
 | 5. Diamonds | Mine at the right depth without dying | — |
 | 6. Nether | Build a portal, find a fortress, get blaze rods | — |
 | 7. Ender pearls | Trade with piglins or hunt endermen | — |
@@ -48,7 +48,7 @@ With `npm start -- --auto` (or `!auto` in chat), the bot works through a list of
 
 1. Get through the night: sleep in its bed, or dig a sealed hole and wait for morning.
 2. Find food when it's getting hungry.
-3. Wooden pickaxe → stone pickaxe → stone sword → a stock of cooked food → a bed → an iron pickaxe.
+3. Wooden pickaxe → stone pickaxe → stone sword → a stock of cooked food → a bed → torches → iron pickaxe → shield → iron sword → water bucket → iron chestplate, leggings, boots and helmet.
 
 If something more important comes up, such as nightfall or hunger, it sets the current goal aside and comes back to it later. A goal that fails waits a while before the bot tries it again. If the bot dies it respawns and starts over from what it has; if it gets disconnected it reconnects. `!status` tells you what it's working on.
 
@@ -81,10 +81,10 @@ Settings such as the bot's name, the server address and who's allowed to give co
 
 The code is built in layers, so each new stage mostly means adding skills and goals:
 
-1. **Skills** ([src/skills/](src/skills/)) are small actions: `collect` (find blocks, break them, pick up drops), `craft`, `hunt`, `smelt`, `combat`, `eat`, `night` (bed or shelter), `explore`, and helpers for stations (placing and picking up tables, furnaces and beds), players and the inventory.
+1. **Skills** ([src/skills/](src/skills/)) are small actions: `collect` (find blocks, break them, pick up drops), `craft`, `hunt`, `smelt`, `combat` (including raising a shield against archers), `eat`, `night` (bed or shelter), `equipment` (wearing the best armor), `buckets` (filling one, pouring it on lava), `light` (torches underground), `explore`, and helpers for stations (placing and picking up tables, furnaces and beds, carving a niche for them in tight tunnels), players and the inventory. [src/movement.js](src/movement.js) sets how the bot may dig: never next to lava.
 2. **Planner** ([src/planner/planner.js](src/planner/planner.js)) works backward from a goal item. Ask for steak and it works out: cows to hunt, a furnace (8 cobblestone, so a wooden pickaxe first), and fuel (coal if it has some, planks if not). It reads recipes from `minecraft-data`, picks the cheapest options given what's nearby, and if its first choice turns out to be a dead end it tries the next one.
 3. **Executor** ([src/skills/obtain.js](src/skills/obtain.js)) does the first step of the plan, then asks for a new plan. If something unexpected happens (it chopped spruce instead of oak, a reflex interrupted it), the next plan accounts for it.
-4. **Survival reflexes** ([src/survival/reflexes.js](src/survival/reflexes.js)) are checked twice a second, every tick when in lava. They interrupt whatever is running to escape lava, swim up for air, run away, fight back or eat, and then the job resumes. The [task runner](src/tasks.js) handles interrupting and resuming.
+4. **Survival reflexes** ([src/survival/reflexes.js](src/survival/reflexes.js)) are checked twice a second, every tick when in lava. They interrupt whatever is running to escape lava, swim up for air, run away, fight back, eat or throw away junk, and then the job resumes. In the background they also put on any better armor and a shield, and keep the bot afloat in water ([src/skills/swimming.js](src/skills/swimming.js)). Mobs it can't reach (deep under water, across a gap) are left alone for 30 seconds instead of chased in circles, and if one of those keeps hurting it, it moves away. The [task runner](src/tasks.js) handles interrupting and resuming.
 5. **Brain** ([src/brain/](src/brain/)) picks goals when the bot plays on its own.
 
 [src/planner/sources.js](src/planner/sources.js) lists where raw items come from: blocks the bot may break (a whitelist, so it never tears down a house for planks), animals to hunt, and what to smelt. Extending it is part of each new stage.
@@ -99,8 +99,10 @@ These run without a server: the planner (plans for many situations), the task ru
 
 ## Known weak spots
 
-- **Lava** still kills it sometimes. It gets out quickly, but lava leaves it burning for about 15 seconds, and without water nearby to put the fire out, that can finish it off. It avoids digging into lava in the first place.
-- **Skeletons and other archers** are dangerous to chase. It backs off sooner from them, but without armor (stage 4) they can still win.
+- **Lava** is survivable with a water bucket (it pours water and keeps full health). Without one, the leftover fire can still kill it. It never breaks blocks next to lava.
+- **Water with a ceiling** (a flooded cave, an underwater tunnel) can still drown it: it floats up, but if there's rock above it has nowhere to breathe.
+- **Underground water** once drowned it mid-fight. It now skips ore that touches water, surfaces earlier and won't fight while short of air; it hasn't drowned since, but flooded caves are still the riskiest place it goes.
+- **Skeletons** are much less of a threat with a shield and armor (it won at full health in testing), but without them they can still win.
 - **Interrupted jobs can leave a furnace or crafting table behind.** If the bot gets pulled away (by a fight, say) and wanders off, it builds a new one later instead of going back for it.
 - **Dying loses everything.** It doesn't go back to pick up its items yet.
 

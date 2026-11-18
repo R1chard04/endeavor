@@ -9,6 +9,8 @@
 // where it left off.
 
 const STOP_TIMEOUT_MS = 5000
+const CANCEL_TIMEOUT_MS = 2000
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export class TaskRunner {
   constructor (bot, { log, say }) {
@@ -80,9 +82,10 @@ export class TaskRunner {
       this.bot.setControlState(control, false)
     }
     try { this.bot.stopDigging() } catch {}
-    await this.bot.collectBlock.cancelTask().catch(() => {})
+    // cancelTask waits for the collect plugin to finish, which never happens if it's stuck.
+    await Promise.race([this.bot.collectBlock.cancelTask().catch(() => {}), delay(CANCEL_TIMEOUT_MS)])
     // Let the task notice and unwind before anything else starts.
-    await Promise.race([task.done, new Promise((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))])
+    await Promise.race([task.done, delay(STOP_TIMEOUT_MS)])
   }
 
   async #execute (task) {
